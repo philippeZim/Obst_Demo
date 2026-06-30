@@ -1,6 +1,7 @@
-import { listModels } from "./api";
+import { detect, listModels } from "./api";
+import { loadModel } from "./bgmodel";
 import { Camera } from "./camera";
-import { DetectionLoop } from "./detection";
+import { captureAndMask } from "./segment";
 import type { DetectionResult, ModelInfo } from "./types";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -8,12 +9,10 @@ const app = document.querySelector<HTMLDivElement>("#app")!;
 /** Active detection session, so we can tear it down on navigation. */
 interface Session {
   camera: Camera;
-  loop: DetectionLoop;
 }
 let session: Session | null = null;
 
 function stopSession(): void {
-  session?.loop.stop();
   session?.camera.stop();
   session = null;
 }
@@ -23,7 +22,7 @@ function setRankingLoading(el: HTMLElement, loading: boolean): void {
   if (loading) {
     el.innerHTML = `<li class="ranking-empty ranking-loading">
       <span class="spinner"></span>
-      Analyzing with VLM…
+      Analyzing…
     </li>`;
   }
 }
@@ -74,33 +73,28 @@ async function showSelection(): Promise<void> {
 async function showDetection(model: ModelInfo): Promise<void> {
   stopSession();
 
-  const isVlm = model.id === "vlm";
-  const badgeClass = isVlm ? "badge badge-manual" : "badge badge-live";
-  const badgeText = isVlm ? "Manual" : "Live";
-  const captureButton = isVlm
-    ? `<button class="button button-capture" id="capture">
-        <span class="button-spinner"></span>
-        <span class="button-label">Capture & Detect</span>
-      </button>`
-    : "";
-
   app.innerHTML = `
     <div class="screen detection">
       <header class="detection-bar">
         <button class="button button-ghost button-icon" id="back" aria-label="Back">‹</button>
         <div class="bar-title">
           <span class="bar-label">${escapeHtml(model.label)}</span>
-          <span class="${badgeClass}">${badgeText}</span>
+          <span class="badge badge-manual">Manual</span>
         </div>
         <span class="bar-spacer"></span>
       </header>
 
       <div class="card camera-card">
         <video id="preview" class="camera-video" playsinline muted autoplay></video>
+        <canvas id="result" class="camera-result hidden"></canvas>
+        <button class="result-close hidden" id="result-close" aria-label="New capture">✕</button>
         <div class="camera-status" id="status">Requesting camera…</div>
       </div>
 
-      ${captureButton}
+      <button class="button button-capture" id="capture" disabled>
+        <span class="button-spinner"></span>
+        <span class="button-label">Capture &amp; Detect</span>
+      </button>
 
       <div class="card ranking-card">
         <div class="card-header">
@@ -108,7 +102,7 @@ async function showDetection(model: ModelInfo): Promise<void> {
           <p class="card-desc">Ranked by confidence</p>
         </div>
         <ul class="ranking-list" id="ranking">
-          <li class="ranking-empty">Waiting for first prediction…</li>
+          <li class="ranking-empty">Press “Capture &amp; Detect” to analyze a frame.</li>
         </ul>
       </div>
     </div>
@@ -119,8 +113,13 @@ async function showDetection(model: ModelInfo): Promise<void> {
   const video = app.querySelector<HTMLVideoElement>("#preview")!;
   const statusEl = app.querySelector<HTMLDivElement>("#status")!;
   const rankingEl = app.querySelector<HTMLUListElement>("#ranking")!;
+  const captureEl = app.querySelector<HTMLButtonElement>("#capture")!;
+  const resultEl = app.querySelector<HTMLCanvasElement>("#result")!;
+  const closeEl = app.querySelector<HTMLButtonElement>("#result-close")!;
+  const labelEl = captureEl.querySelector<HTMLSpanElement>(".button-label")!;
 
   const camera = new Camera(video);
+  session = { camera };
   try {
     await camera.start();
     statusEl.classList.add("hidden");
@@ -132,41 +131,85 @@ async function showDetection(model: ModelInfo): Promise<void> {
     return;
   }
 
-  const captureEl = isVlm
-    ? app.querySelector<HTMLButtonElement>("#capture")!
-    : null;
+  // Manual-only: segmentation/detection runs solely on a button press, so the
+  // live camera view is never slowed down by background processing.
+  let busy = false;
+  let modelReady = false;
+  let showingResult = false;
 
-  const loop = new DetectionLoop(camera, model.id, {
-    onResult: (result) => renderRanking(rankingEl, result),
-    onError: (error) => {
-      console.error("detection failed:", error);
-      renderRanking(rankingEl, {
-        model: model.id,
-        predictions: [],
-        error: String(error),
-      });
-    },
-    onLoading: (loading) => {
-      setRankingLoading(rankingEl, loading);
-      if (captureEl) {
-        captureEl.disabled = loading;
-        captureEl.classList.toggle("button-loading", loading);
-      }
-    },
-  }, 600, isVlm);
+  const syncButton = () => {
+    captureEl.disabled = busy || !modelReady;
+    captureEl.classList.toggle("button-loading", busy);
+    captureEl.classList.toggle("hidden", showingResult);
+    labelEl.textContent = busy ? "Analyzing…" : "Capture & Detect";
+  };
 
-  if (isVlm && captureEl) {
-    captureEl.addEventListener("click", () => {
-      setRankingLoading(rankingEl, true);
-      captureEl.disabled = true;
-      captureEl.classList.add("button-loading");
-      loop.capture();
+  // Download / initialise the RMBG model up front; enable capture once settled
+  // (even on failure — capture then runs unmasked rather than being stuck).
+  loadModel((pct) => {
+    if (!modelReady && pct < 100) labelEl.textContent = `Loading model… ${pct}%`;
+  })
+    .catch((err) => console.error("background model failed to load:", err))
+    .finally(() => {
+      modelReady = true;
+      syncButton();
     });
-  } else {
-    loop.start();
-  }
 
-  session = { camera, loop };
+  // Return to the live camera view, ready for the next capture.
+  const reset = () => {
+    showingResult = false;
+    resultEl.classList.add("hidden");
+    closeEl.classList.add("hidden");
+    rankingEl.innerHTML =
+      '<li class="ranking-empty">Press “Capture &amp; Detect” to analyze a frame.</li>';
+    syncButton();
+  };
+  closeEl.addEventListener("click", reset);
+
+  captureEl.addEventListener("click", () => {
+    if (busy || !modelReady || showingResult) return;
+    busy = true;
+    syncButton();
+    setRankingLoading(rankingEl, true);
+    void (async () => {
+      try {
+        const cap = await captureAndMask(camera);
+        if (!cap) {
+          renderRanking(rankingEl, {
+            model: model.id,
+            predictions: [],
+            error: "Could not grab a camera frame.",
+          });
+          return;
+        }
+        // Replace the live view with the white-background cut-out.
+        drawImageData(resultEl, cap.masked);
+        showingResult = true;
+        resultEl.classList.remove("hidden");
+        closeEl.classList.remove("hidden");
+
+        const result = await detect(model.id, cap.frame);
+        renderRanking(rankingEl, result);
+      } catch (error) {
+        console.error("detection failed:", error);
+        renderRanking(rankingEl, {
+          model: model.id,
+          predictions: [],
+          error: String(error),
+        });
+      } finally {
+        busy = false;
+        syncButton();
+      }
+    })();
+  });
+}
+
+/** Paint an `ImageData` onto a canvas at native resolution (CSS scales it). */
+function drawImageData(canvas: HTMLCanvasElement, image: ImageData): void {
+  canvas.width = image.width;
+  canvas.height = image.height;
+  canvas.getContext("2d")!.putImageData(image, 0, 0);
 }
 
 // --- Rendering helpers -----------------------------------------------------

@@ -297,6 +297,57 @@ body {
   display: block;
 }
 
+/* --- Capture result (replaces the live view in place) --------------------- */
+
+.camera-result {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: #fff;
+}
+
+.camera-result.hidden {
+  display: none;
+}
+
+.result-close {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  z-index: 2;
+  width: 2.4rem;
+  height: 2.4rem;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 999px;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  /* theme-independent dark pill so the white ✕ stays visible on the white
+     masked background and in dark mode alike */
+  color: #fff;
+  background: rgba(20, 20, 22, 0.7);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  transition: background 0.15s ease, transform 0.05s ease;
+}
+
+.result-close:hover {
+  background: rgba(20, 20, 22, 0.88);
+}
+
+.result-close:active {
+  transform: scale(0.94);
+}
+
+.result-close.hidden {
+  display: none;
+}
+
 .camera-status {
   position: absolute;
   inset: 0;
@@ -448,6 +499,10 @@ body {
 
 .button-capture:disabled {
   pointer-events: none;
+}
+
+.button-capture.hidden {
+  display: none;
 }
 
 /* Loading state: darker background + spinner appears. */

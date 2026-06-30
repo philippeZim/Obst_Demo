@@ -44,28 +44,30 @@ export class Camera {
     this.video.srcObject = null;
   }
 
+  /** Edge length detection frames are captured at (Fruit-360 is 100x100). */
+  get detectionSize(): number {
+    return this.target;
+  }
+
   /**
-   * Grab the current frame, centre-cropped to a square and downscaled.
-   * Returns null until the video has dimensions.
+   * Grab the current frame, centre-cropped to a square and downscaled to
+   * `size`, as raw RGBA pixels. Returns null until the video has dimensions.
+   * Used by the segmenter and the live mask preview.
    */
-  capture(): CapturedFrame | null {
+  grab(size: number): ImageData | null {
     const vw = this.video.videoWidth;
     const vh = this.video.videoHeight;
     if (!vw || !vh) return null;
 
-    const size = this.target;
     this.canvas.width = size;
     this.canvas.height = size;
-    const ctx = this.canvas.getContext("2d");
+    const ctx = this.canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return null;
 
-    // Centre-crop the largest square from the source frame.
     const side = Math.min(vw, vh);
     const sx = (vw - side) / 2;
     const sy = (vh - side) / 2;
     ctx.drawImage(this.video, sx, sy, side, side, 0, 0, size, size);
-
-    const dataUrl = this.canvas.toDataURL("image/jpeg", 0.7);
-    return { base64: dataUrl.split(",")[1] ?? "", width: size, height: size };
+    return ctx.getImageData(0, 0, size, size);
   }
 }
