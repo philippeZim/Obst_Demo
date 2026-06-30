@@ -16,4 +16,8 @@ export interface DetectionResult {
   model: string;
   /** Sorted by descending confidence. */
   predictions: Prediction[];
+  /** Human-readable error message (shown in the UI). */
+  error?: string | null;
+  /** Raw model response for debugging. */
+  raw?: string | null;
 }

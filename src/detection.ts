@@ -7,6 +7,8 @@ import type { DetectionResult } from "./types";
 export interface DetectionHandlers {
   onResult: (result: DetectionResult) => void;
   onError?: (error: unknown) => void;
+  /** Fired when a capture starts / finishes so the UI can show a spinner. */
+  onLoading?: (loading: boolean) => void;
 }
 
 export class DetectionLoop {
@@ -15,16 +17,19 @@ export class DetectionLoop {
 
   /**
    * @param intervalMs how often to sample a frame and run recognition
+   * @param manual when true, no interval is started; call capture() to trigger manually
    */
   constructor(
     private readonly camera: Camera,
     private readonly modelId: string,
     private readonly handlers: DetectionHandlers,
-    private readonly intervalMs = 600
+    private readonly intervalMs = 600,
+    private readonly manual = false
   ) {}
 
   start(): void {
     if (this.timer !== null) return;
+    if (this.manual) return;
     this.timer = window.setInterval(() => void this.tick(), this.intervalMs);
   }
 
@@ -35,6 +40,10 @@ export class DetectionLoop {
     }
   }
 
+  capture(): void {
+    void this.tick();
+  }
+
   private async tick(): Promise<void> {
     // Skip if the previous inference hasn't returned yet.
     if (this.inFlight) return;
@@ -42,6 +51,7 @@ export class DetectionLoop {
     if (!frame) return;
 
     this.inFlight = true;
+    this.handlers.onLoading?.(true);
     try {
       const result = await detect(this.modelId, frame);
       this.handlers.onResult(result);
@@ -49,6 +59,7 @@ export class DetectionLoop {
       this.handlers.onError?.(error);
     } finally {
       this.inFlight = false;
+      this.handlers.onLoading?.(false);
     }
   }
 }

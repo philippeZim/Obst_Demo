@@ -18,6 +18,16 @@ function stopSession(): void {
   session = null;
 }
 
+/** Show a loading spinner in the ranking area. */
+function setRankingLoading(el: HTMLElement, loading: boolean): void {
+  if (loading) {
+    el.innerHTML = `<li class="ranking-empty ranking-loading">
+      <span class="spinner"></span>
+      Analyzing with VLM…
+    </li>`;
+  }
+}
+
 // --- Screens ---------------------------------------------------------------
 
 async function showSelection(): Promise<void> {
@@ -64,13 +74,23 @@ async function showSelection(): Promise<void> {
 async function showDetection(model: ModelInfo): Promise<void> {
   stopSession();
 
+  const isVlm = model.id === "vlm";
+  const badgeClass = isVlm ? "badge badge-manual" : "badge badge-live";
+  const badgeText = isVlm ? "Manual" : "Live";
+  const captureButton = isVlm
+    ? `<button class="button button-capture" id="capture">
+        <span class="button-spinner"></span>
+        <span class="button-label">Capture & Detect</span>
+      </button>`
+    : "";
+
   app.innerHTML = `
     <div class="screen detection">
       <header class="detection-bar">
         <button class="button button-ghost button-icon" id="back" aria-label="Back">‹</button>
         <div class="bar-title">
           <span class="bar-label">${escapeHtml(model.label)}</span>
-          <span class="badge badge-live">Live</span>
+          <span class="${badgeClass}">${badgeText}</span>
         </div>
         <span class="bar-spacer"></span>
       </header>
@@ -79,6 +99,8 @@ async function showDetection(model: ModelInfo): Promise<void> {
         <video id="preview" class="camera-video" playsinline muted autoplay></video>
         <div class="camera-status" id="status">Requesting camera…</div>
       </div>
+
+      ${captureButton}
 
       <div class="card ranking-card">
         <div class="card-header">
@@ -110,11 +132,40 @@ async function showDetection(model: ModelInfo): Promise<void> {
     return;
   }
 
+  const captureEl = isVlm
+    ? app.querySelector<HTMLButtonElement>("#capture")!
+    : null;
+
   const loop = new DetectionLoop(camera, model.id, {
     onResult: (result) => renderRanking(rankingEl, result),
-    onError: (error) => console.error("detection failed:", error),
-  });
-  loop.start();
+    onError: (error) => {
+      console.error("detection failed:", error);
+      renderRanking(rankingEl, {
+        model: model.id,
+        predictions: [],
+        error: String(error),
+      });
+    },
+    onLoading: (loading) => {
+      setRankingLoading(rankingEl, loading);
+      if (captureEl) {
+        captureEl.disabled = loading;
+        captureEl.classList.toggle("button-loading", loading);
+      }
+    },
+  }, 600, isVlm);
+
+  if (isVlm && captureEl) {
+    captureEl.addEventListener("click", () => {
+      setRankingLoading(rankingEl, true);
+      captureEl.disabled = true;
+      captureEl.classList.add("button-loading");
+      loop.capture();
+    });
+  } else {
+    loop.start();
+  }
+
   session = { camera, loop };
 }
 
@@ -133,10 +184,25 @@ function modelCard(model: ModelInfo): string {
 }
 
 function renderRanking(el: HTMLElement, result: DetectionResult): void {
+  if (result.error) {
+    el.innerHTML = `
+      <li class="ranking-empty ranking-error">${escapeHtml(result.error)}</li>
+      ${result.raw ? `
+        <li class="ranking-raw">
+          <details>
+            <summary>Raw model response</summary>
+            <pre>${escapeHtml(result.raw)}</pre>
+          </details>
+        </li>` : ""
+      }`;
+    return;
+  }
+
   if (result.predictions.length === 0) {
     el.innerHTML = `<li class="ranking-empty">No detections.</li>`;
     return;
   }
+
   el.innerHTML = result.predictions
     .map((p, i) => {
       const pct = Math.round(p.confidence * 100);
@@ -155,7 +221,16 @@ function renderRanking(el: HTMLElement, result: DetectionResult): void {
         </li>
       `;
     })
-    .join("");
+    .join("") +
+    (result.raw
+      ? `
+        <li class="ranking-raw">
+          <details>
+            <summary>Raw model response</summary>
+            <pre>${escapeHtml(result.raw)}</pre>
+          </details>
+        </li>`
+      : "");
 }
 
 function errorView(title: string, detail: string): string {
